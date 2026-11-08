@@ -1,0 +1,186 @@
+import logging
+import threading
+
+from config import (
+    EMBEDDING_SPACE,
+    K_GRAFO,
+    MAX_RELACOES,
+    N_ENTIDADES,
+    RELACOES_POR_ENTIDADE,
+    SCORE_MIN,
+    TETO_GRAU,
+    TOP_K,
+)
+
+from .connection import get_graph
+from .embeddings import SpaceEmbeddings
+
+logger = logging.getLogger(__name__)
+
+
+class HybridRetriever:
+    """GraphRAG: busca vetorial em chunks/entidades + expansão por relações do grafo."""
+
+    _instance: "HybridRetriever | None" = None
+    _lock = threading.Lock()
+
+    def __init__(self) -> None:
+        self.embedding_model = SpaceEmbeddings(EMBEDDING_SPACE)  # type: ignore
+        self.graph = get_graph()
+
+    @classmethod
+    def get_instance(cls) -> "HybridRetriever":
+        """Singleton thread-safe: evita recarregar o BGE-M3 a cada chamada."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def _chunks_entrada(self, vec: list[float]) -> list[dict]:
+        return self.graph.query(
+            """
+            MATCH (d:Document)
+                SEARCH d IN (VECTOR INDEX chunk_embedding FOR $vec LIMIT $k)
+                SCORE AS score
+            OPTIONAL MATCH (d)-[:PARTE_DE]->(a:Artigo)
+            RETURN d.id AS id, d.text AS texto, score, a.titulo AS titulo
+            """,
+            {"k": TOP_K, "vec": vec},
+        )
+
+    def _entidades_entrada(self, vec: list[float]) -> list[dict]:
+        return self.graph.query(
+            """
+            MATCH (e:__Entity__)
+                SEARCH e IN (VECTOR INDEX entity_embedding FOR $vec LIMIT $n)
+                SCORE AS score
+            WHERE score >= $min AND e.grau <= $teto
+            RETURN elementId(e) AS eid, e.id AS nome,
+                   coalesce(e.descricao, '') AS descricao, score
+            """,
+            {"n": N_ENTIDADES, "vec": vec, "min": SCORE_MIN, "teto": TETO_GRAU},
+        )
+
+    def _relacoes_do_grafo(self, eids: list[str], vec: list[float]) -> list[dict]:
+        return self.graph.query(
+            """
+            MATCH (e:__Entity__) WHERE elementId(e) IN $eids
+            MATCH (e)-[r]-(v:__Entity__)
+            WHERE v.grau <= $teto AND v.embedding IS NOT NULL
+            WITH e, r, vector.similarity.cosine(v.embedding, $vec) AS sim
+            ORDER BY sim DESC
+            WITH e, collect({r: r, sim: sim})[..$por_entidade] AS top
+            UNWIND top AS t
+            WITH t.r AS r, max(t.sim) AS sim
+            ORDER BY sim DESC
+            LIMIT $max
+            RETURN startNode(r).id AS origem, type(r) AS rel, endNode(r).id AS destino,
+                   coalesce(startNode(r).descricao, '') AS desc_origem,
+                   coalesce(endNode(r).descricao, '') AS desc_destino,
+                   elementId(startNode(r)) AS eid_origem,
+                   elementId(endNode(r)) AS eid_destino, sim
+            """,
+            {
+                "eids": eids,
+                "vec": vec,
+                "teto": TETO_GRAU,
+                "por_entidade": RELACOES_POR_ENTIDADE,
+                "max": MAX_RELACOES,
+            },
+        )
+
+    def _chunks_do_grafo(self, ents: list[str], excluir: list[str]) -> list[dict]:
+        # O CASE evita log(1) = 0 -> divisão por zero quando n_mentions é 0/nulo.
+        return self.graph.query(
+            """
+            UNWIND $ents AS eid
+            MATCH (x:__Entity__) WHERE elementId(x) = eid
+            MATCH (d:Document)-[:MENTIONS]->(x)
+                WHERE NOT d.id IN $excluir
+            WITH d, sum(1.0 / log(1 + CASE WHEN coalesce(x.n_mentions, 0) < 1
+                                           THEN 1 ELSE x.n_mentions END)) AS relevancia
+            ORDER BY relevancia DESC
+            LIMIT $k
+            OPTIONAL MATCH (d)-[:PARTE_DE]->(a:Artigo)
+            RETURN d.id AS id, d.text AS texto, relevancia, a.titulo AS titulo
+            """,
+            {"ents": ents, "excluir": excluir, "k": K_GRAFO},
+        )
+
+    @staticmethod
+    def _formatar_relacoes(nos_entrada: list[dict], relacoes: list[dict]) -> str:
+        if not relacoes:
+            return "Nenhuma relação direta encontrada no grafo.\n\n"
+
+        descricoes = {
+            e["nome"]: e["descricao"] for e in nos_entrada if e.get("descricao")
+        }
+        for rel in relacoes:
+            if rel["desc_origem"]:
+                descricoes.setdefault(rel["origem"], rel["desc_origem"])
+            if rel["desc_destino"]:
+                descricoes.setdefault(rel["destino"], rel["desc_destino"])
+
+        bloco_entidades = "\n".join(f"- {n}: {d}" for n, d in descricoes.items())
+        bloco_relacoes = "\n".join(
+            f"{r['origem']} -[{r['rel']}]-> {r['destino']}" for r in relacoes
+        )
+        return (
+            f"=== ENTIDADES DO GRAFO ===\n{bloco_entidades}\n\n"
+            f"=== RELAÇÕES ===\n{bloco_relacoes}\n\n"
+        )
+
+    @staticmethod
+    def _formatar_chunks(chunks: list[dict]) -> str:
+        if not chunks:
+            return "=== TRECHOS DE ARTIGOS (CHUNKS) ===\nNenhum trecho relevante encontrado."
+        corpo = "\n\n".join(
+            f"[FONTE: {c.get('titulo') or 'Sem título'}]\n{c['texto']}" for c in chunks
+        )
+        return f"=== TRECHOS DE ARTIGOS (CHUNKS) ===\n{corpo}"
+
+    def recuperar_contexto(self, pergunta: str) -> str:
+        """Pipeline GraphRAG: retorna o contexto formatado para o LLM."""
+        vec = self.embedding_model.embed_query(pergunta)
+
+        chunks_base = self._chunks_entrada(vec)
+        nos_entrada = self._entidades_entrada(vec)
+        eids = [e["eid"] for e in nos_entrada]
+
+        relacoes: list[dict] = []
+        chunks_extras: list[dict] = []
+        if eids:
+            relacoes = self._relacoes_do_grafo(eids, vec)
+            todos = set(eids)
+            for r in relacoes:
+                todos.update((r["eid_origem"], r["eid_destino"]))
+            chunks_extras = self._chunks_do_grafo(
+                list(todos), excluir=[c["id"] for c in chunks_base]
+            )
+
+        logger.debug(
+            "GraphRAG: %d chunks, %d entidades, %d relações, %d chunks extras",
+            len(chunks_base),
+            len(nos_entrada),
+            len(relacoes),
+            len(chunks_extras),
+        )
+        return self._formatar_relacoes(nos_entrada, relacoes) + self._formatar_chunks(
+            chunks_base + chunks_extras
+        )
+
+    def buscar_artigos(self, consulta: str) -> list[dict]:
+        """Artigos mais relevantes (melhor chunk por artigo), ordenados por score."""
+        vec = self.embedding_model.embed_query(consulta)
+        artigos: dict[str, dict] = {}
+        for c in self._chunks_entrada(vec):
+            titulo = c.get("titulo") or "Sem título"
+            atual = artigos.get(titulo)
+            if atual is None or c["score"] > atual["score"]:
+                artigos[titulo] = {
+                    "titulo": titulo,
+                    "score": round(c["score"], 3),
+                    "trecho": (c["texto"] or "")[:400],
+                }
+        return sorted(artigos.values(), key=lambda a: a["score"], reverse=True)
