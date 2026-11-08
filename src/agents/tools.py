@@ -74,18 +74,42 @@ def buscar_projetos_semelhantes(palavras_chave: list[str]) -> str:
 
 @tool
 @_safe_tool
-def perfil_entidade(nome: str, tipo: Literal["Author"] = "Author") -> str:
+def artigos_do_autor(nome: str) -> str:
     """
-    Busca o perfil completo de uma entidade no grafo, como um autor específico.
-    Retorna o total de publicações, títulos e os principais tópicos pesquisados por essa pessoa.
+    Lista os artigos do WIT escritos por uma pessoa (autora ou autor), com link.
+    Aceita nome parcial e ignora acentos e maiúsculas (ex: "Laura Jurgina").
+    Não tolera erros de digitação: em caso de falha, tente o sobrenome isolado.
 
     Args:
-        nome: O nome exato da entidade (ex: "Renata Reiser").
-        tipo: O tipo da entidade (atualmente apenas "Author").
+        nome: Nome ou parte do nome da pessoa.
     """
-    results = queries.get_entity_profile(nome, tipo)
+    results = queries.find_author_works(nome)
     if not results:
-        return f"Perfil não encontrado para {nome}."
+        return (
+            f"Nenhum autor encontrado com o nome '{nome}'. "
+            "Tente outra variação (apenas o sobrenome, por exemplo)."
+        )
+
+    return json.dumps(results, ensure_ascii=False, default=str)
+
+
+
+@tool
+@_safe_tool
+def autores_do_artigo(titulo: str) -> str:
+    """
+    Encontra um artigo do WIT pelo título (ou palavras distintivas dele)
+    e retorna seus autores e link.
+
+    Args:
+        titulo: Título completo ou palavras-chave do título.
+    """
+    results = queries.find_articles_by_title(titulo)
+    if not results:
+        return (
+            f"Nenhum artigo encontrado para '{titulo}'. "
+            "Tente menos palavras, só as mais distintivas."
+        )
     return json.dumps(results, ensure_ascii=False, default=str)
 
 
@@ -93,5 +117,6 @@ RESEARCHER_TOOLS: list[BaseTool] = [
     buscar_artigos_wit,
     pesquisar_contexto_wit,
     buscar_projetos_semelhantes,
-    perfil_entidade,
+    artigos_do_autor,
+    autores_do_artigo,
 ]

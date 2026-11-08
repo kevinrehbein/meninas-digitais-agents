@@ -44,7 +44,7 @@ class HybridRetriever:
                 SEARCH d IN (VECTOR INDEX chunk_embedding FOR $vec LIMIT $k)
                 SCORE AS score
             OPTIONAL MATCH (d)-[:PARTE_DE]->(a:Artigo)
-            RETURN d.id AS id, d.text AS texto, score, a.titulo AS titulo
+            RETURN d.id AS id, d.text AS texto, score, a.titulo AS titulo, a.url_artigo AS url
             """,
             {"k": TOP_K, "vec": vec},
         )
@@ -103,11 +103,12 @@ class HybridRetriever:
             ORDER BY relevancia DESC
             LIMIT $k
             OPTIONAL MATCH (d)-[:PARTE_DE]->(a:Artigo)
-            RETURN d.id AS id, d.text AS texto, relevancia, a.titulo AS titulo
+            RETURN d.id AS id, d.text AS texto, relevancia, a.titulo AS titulo, a.url_artigo AS url
             """,
             {"ents": ents, "excluir": excluir, "k": K_GRAFO},
         )
 
+    # --------------------------------------------------------------- formatação
     @staticmethod
     def _formatar_relacoes(nos_entrada: list[dict], relacoes: list[dict]) -> str:
         if not relacoes:
@@ -136,7 +137,8 @@ class HybridRetriever:
         if not chunks:
             return "=== TRECHOS DE ARTIGOS (CHUNKS) ===\nNenhum trecho relevante encontrado."
         corpo = "\n\n".join(
-            f"[FONTE: {c.get('titulo') or 'Sem título'}]\n{c['texto']}" for c in chunks
+            f"[FONTE: {c.get('titulo') or 'Sem título'} | {c.get('url') or ''}]\n{c['texto']}"
+            for c in chunks
         )
         return f"=== TRECHOS DE ARTIGOS (CHUNKS) ===\n{corpo}"
 
@@ -179,6 +181,7 @@ class HybridRetriever:
             atual = artigos.get(titulo)
             if atual is None or c["score"] > atual["score"]:
                 artigos[titulo] = {
+                    "url": c.get("url"),
                     "titulo": titulo,
                     "score": round(c["score"], 3),
                     "trecho": (c["texto"] or "")[:400],

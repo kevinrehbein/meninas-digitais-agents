@@ -31,18 +31,17 @@ class TaskDecomposition(BaseModel):
 class PlanStep(BaseModel):
     etapa: str = Field(..., description="Nome curto da etapa")
     descricao: str = Field(..., description="2-3 frases: o que fazer, como, com quem e em quanto tempo")
-    fonte: str | None = Field(None, description="Título do artigo que embasa a etapa; null se for proposta sua")
+    fonte: str | None = Field(None, description="Link Markdown [título](url) copiado das evidências; null se for proposta sua")
 
 class ProjectPlan(BaseModel):
     title: str = Field(..., description="Título do projeto proposto")
     target_audience: str = Field(..., description="Público alvo do projeto")
-    justification: str = Field(..., description="4-6 frases citando artigos pelo título")
+    justification: str = Field(..., description="4-6 frases citando artigos como link Markdown [título](url)")
     methodology: list[PlanStep] = Field(..., min_length=1)
     challenges: list[str] = Field(..., min_length=1, description="Desafios prováveis")
-    indicators: list[str] = Field(..., min_length=1, description="Indicadores de sucesso mensuráveis")
+    indicators: list[str] = Field(..., min_length=1, description="Indicadores de sucesso mensuráveis citando artigos como link Markdown [título](url)")
     expected_results: list[str] = Field(..., min_length=1, description="Resultados esperados")
-    references: list[str] = Field(..., description="Artigos do WIT citados (nós do grafo)")
-
+    references: list[str] = Field(..., description="Artigos do WIT citados, como links Markdown [título](url) copiados das evidências")
 
 class Review(BaseModel):
     """Usado pelo verificador para decidir o próximo passo do fluxo."""

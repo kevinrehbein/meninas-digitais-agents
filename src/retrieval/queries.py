@@ -1,16 +1,10 @@
-"""Consultas Cypher estruturadas usadas pelas ferramentas do pesquisador.
-
-ASSUMPTIONS sobre o schema do grafo (ajuste se o seu for diferente):
-- (:Document)-[:PARTE_DE]->(:Artigo {titulo})
-- (:Document)-[:MENTIONS]->(:__Entity__ {id})
-- Autores são entidades com o label `Author` (id = nome).
-"""
-
 from .connection import get_graph
 
-# Labels não podem ser parametrizados em Cypher; usamos uma allowlist para
-# impedir injeção de Cypher via argumento gerado pelo LLM.
-ENTITY_LABELS: dict[str, str] = {"Author": "Author"}
+MAX_TOKENS = 6  # limita termos vindos do LLM
+
+
+def _tokens(texto: str) -> list[str]:
+    return texto.lower().replace("\xa0", " ").split()[:MAX_TOKENS]
 
 
 def find_similar_projects_by_keyword(
@@ -35,37 +29,35 @@ def find_similar_projects_by_keyword(
     )
 
 
-def get_entity_profile(name: str, entity_type: str = "Author") -> list[dict]:
-    label = ENTITY_LABELS.get(entity_type)
-    if label is None:
-        raise ValueError(f"Tipo de entidade não suportado: {entity_type!r}")
-    graph = get_graph()
-    params = {"nome": name.strip()}
-
-    publicacoes = graph.query(
-        f"""
-        MATCH (p:`{label}`) WHERE toLower(p.id) = toLower($nome)
-        OPTIONAL MATCH (p)<-[:MENTIONS]-(:Document)-[:PARTE_DE]->(a:Artigo)
-        RETURN p.id AS name,
-               count(DISTINCT a) AS total_publicacoes,
-               collect(DISTINCT a.titulo) AS titulos
-        """,
-        params,
-    )
-    if not publicacoes:
+def find_author_works(nome: str, limit: int = 20) -> list[dict]:
+    tokens = _tokens(nome)
+    if not tokens:
         return []
-
-    topicos = graph.query(
-        f"""
-        MATCH (p:`{label}`) WHERE toLower(p.id) = toLower($nome)
-        MATCH (p)<-[:MENTIONS]-(d:Document)-[:MENTIONS]->(t:__Entity__)
-        WHERE t <> p AND NOT t:`{label}`
-        RETURN t.id AS topico, count(DISTINCT d) AS frequencia
-        ORDER BY frequencia DESC
-        LIMIT 5
+    return get_graph().query(
+        """
+        MATCH (au:Autor)
+        WHERE all(t IN $tokens WHERE toLower(au.nome) CONTAINS t)
+        WITH au LIMIT $limit
+        MATCH (a:Artigo)-[:ESCRITO_POR]->(au)
+        RETURN au.nome AS autor,
+               collect(DISTINCT {titulo: a.titulo, url: a.url_artigo}) AS artigos
         """,
-        params,
+        {"tokens": tokens, "limit": limit},
     )
-    perfil = dict(publicacoes[0])
-    perfil["principais_topicos"] = [t["topico"] for t in topicos]
-    return [perfil]
+
+
+def find_articles_by_title(titulo: str, limit: int = 20) -> list[dict]:
+    tokens = _tokens(titulo)
+    if not tokens:
+        return []
+    return get_graph().query(
+        """
+        MATCH (a:Artigo)
+        WHERE all(t IN $tokens WHERE toLower(a.titulo) CONTAINS t)
+        WITH a LIMIT $limit
+        OPTIONAL MATCH (a)-[:ESCRITO_POR]->(au:Autor)
+        RETURN a.titulo AS titulo, a.url_artigo AS url,
+               collect(au.nome) AS autores
+        """,
+        {"tokens": tokens, "limit": limit},
+    )

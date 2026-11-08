@@ -1,3 +1,5 @@
+"""Frontend Streamlit. Execute com:  streamlit run src/app.py"""
+
 import logging
 
 import streamlit as st
@@ -57,9 +59,7 @@ def describe(node: str, update: dict) -> str:
     if node == "pesquisador_tools":
         return "📚 Ferramentas — evidências recebidas"
     if node == "verificador":
-        feedback = update.get("feedback")
-        extra = f"\n> {feedback}" if feedback else ""
-        return f"🧪 **Verificador** — veredito `{update.get('verdict')}`{extra}"
+        return f"🧪 **Verificador** — veredito `{update.get('verdict')}`"
     return NODE_LABELS.get(node, node)
 
 
